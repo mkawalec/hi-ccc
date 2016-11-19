@@ -111,4 +111,4 @@ main = do
   mapM (\_ -> forkIO $ reqLoop queueChan manager) [0..howManyConcurrentCrawls]
   readChan queueChan
 
-howManyConcurrentCrawls = 10
+howManyConcurrentCrawls = 20
