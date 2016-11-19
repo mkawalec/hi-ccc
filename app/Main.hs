@@ -43,7 +43,7 @@ joinedQueue :: [Tag Text] -> Bool
 joinedQueue = any isJoinedNode
 
 isJoinedNode :: Tag Text -> Bool
-isJoinedNode (TagText str) = T.count magicQueueString str > 0
+isJoinedNode (TagText str) = T.count magicQueueString (T.toLower str) > 0
 isJoinedNode _ = False
 
 extractLinks :: Tag Text -> [Text]
@@ -75,7 +75,7 @@ makeRequest_ manager (Recursive isRecursive) inputJar url = do
         then do
           let links = findLinks parsedBody
           cookieJars <- mapM (makeRequest manager (Recursive False) (Just responseCookies) . T.unpack) links
-          return (or . map fst $ cookieJars, mconcat . map snd $ cookieJars) 
+          return (or $ hasJoinedQueue:(map fst $ cookieJars), mconcat . map snd $ cookieJars) 
         else return (hasJoinedQueue, responseCookies)
 
 makeRequest :: Manager -> Recursive -> Maybe CookieJar -> String -> IO (Bool, CookieJar)
