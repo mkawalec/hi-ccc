@@ -15,6 +15,9 @@ import Data.Maybe (catMaybes, isJust, fromJust, isNothing, fromMaybe)
 import qualified Debug.Trace as DT
 import Control.Concurrent.STM.TChan
 
+import qualified Data.Map.Lazy as M
+import Data.Map.Lazy (Map)
+
 import Control.Exception
 import Control.Monad (void)
 import Control.Concurrent.STM
@@ -28,6 +31,11 @@ userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 
 
 magicQueueString = "currently at position"
 
+cccAddress = "https://tickets.events.ccc.de/33c3/"
+addrRoot = "https://tickets.events.ccc.de"
+--cccAddress = "http://127.0.0.1:8080/33c3/"
+--addrRoot = "http://127.0.0.1:8080"
+
 containsLink :: Tag Text -> Bool
 containsLink (TagOpen rawTagName attrs) = correctTagName && correctAttr
   where tagName        = T.toLower rawTagName
@@ -35,9 +43,30 @@ containsLink (TagOpen rawTagName attrs) = correctTagName && correctAttr
         correctAttr    = any (\(attrName, _) -> attrName == "action" || attrName == "href") attrs
 containsLink _ = False
 
-toLink :: Attribute Text -> Maybe Text
-toLink (attrName, attrBody) = 
-  if attrName == "action" || attrName == "href" then Just attrBody else Nothing
+data JoinLink = Get Text | Post Text | NoUrl
+  deriving (Eq, Ord, Show)
+
+toLink :: Map Text Text -> JoinLink
+toLink attrMap = case M.lookup "action" attrMap of
+  Just actionUrl -> case M.lookup "method" attrMap of
+    Just method -> case T.toLower method of
+      "post" -> Post actionUrl
+      "get"  -> Get actionUrl
+      _      -> NoUrl
+    Nothing -> NoUrl
+  Nothing -> case M.lookup "href" attrMap of
+    Just actionUrl -> Get actionUrl
+    Nothing -> NoUrl
+
+urlToAbsolute :: Text -> Text
+urlToAbsolute link = case (T.count "http://" link > 0) || (T.count "https://" link > 0) of
+  True -> link
+  False -> T.append addrRoot link
+
+linkToAbsolute :: JoinLink -> JoinLink
+linkToAbsolute (Get linkUrl) = Get $ urlToAbsolute linkUrl
+linkToAbsolute (Post linkUrl) = Post $ urlToAbsolute linkUrl
+linkToAbsolute NoUrl = NoUrl
 
 joinedQueue :: [Tag Text] -> Bool
 joinedQueue = any isJoinedNode
@@ -46,23 +75,36 @@ isJoinedNode :: Tag Text -> Bool
 isJoinedNode (TagText str) = T.count magicQueueString (T.toLower str) > 0
 isJoinedNode _ = False
 
-extractLinks :: Tag Text -> [Text]
-extractLinks (TagOpen _ attrs) = catMaybes $ map toLink attrs
+filterNoops :: [JoinLink] -> [JoinLink]
+filterNoops = filter (\link -> case link of
+  Get _  -> True
+  Post _ -> True
+  NoUrl  -> False)
+
+extractLinks :: Tag Text -> [JoinLink]
+extractLinks (TagOpen _ attrs) = map linkToAbsolute . filterNoops $ [toLink attrMap]
+  where attrMap = M.fromList attrs
 extractLinks _ = []
 
-findLinks :: [Tag Text] -> [Text]
+findLinks :: [Tag Text] -> [JoinLink]
 findLinks = concat . map extractLinks . filter containsLink
 
 newtype Recursive = Recursive Bool
 
-makeRequest_ :: Manager -> Recursive -> Maybe CookieJar -> String -> IO (Bool, CookieJar)
-makeRequest_ manager (Recursive isRecursive) inputJar url = do
+makeRequest_ :: Manager -> Recursive -> Maybe CookieJar -> JoinLink -> IO (Bool, CookieJar)
+makeRequest_ manager (Recursive isRecursive) inputJar wrappedUrl = do
   let cookieJar' = fromMaybe (createCookieJar []) inputJar
-  case parseRequest url :: Maybe Request of
+      (reqUrl, method) = case wrappedUrl of
+        Get actionUrl -> (actionUrl, "GET")
+        Post actionUrl -> (actionUrl, "POST")
+        NoUrl          -> ("", "")
+
+  case (parseRequest $ T.unpack reqUrl) :: Maybe Request of
     Nothing -> return (False, cookieJar')
     Just request -> do
-      let request' = request { 
-          requestHeaders = [("user-agent", userAgent)]
+      let request' = request {
+          method = method
+        , requestHeaders = [("user-agent", userAgent)]
         , cookieJar = Just cookieJar'
       }
       response <- httpLbs request' manager
@@ -71,17 +113,17 @@ makeRequest_ manager (Recursive isRecursive) inputJar url = do
           parsedBody      = parseTags body
           hasJoinedQueue  = joinedQueue parsedBody
 
-      if isRecursive 
+      if isRecursive
         then do
           let links = findLinks parsedBody
-          cookieJars <- mapM (makeRequest manager (Recursive False) (Just responseCookies) . T.unpack) links
-          return (or $ hasJoinedQueue:(map fst $ cookieJars), mconcat . map snd $ cookieJars) 
+          cookieJars <- mapM (makeRequest manager (Recursive False) (Just responseCookies)) links
+          return (or $ hasJoinedQueue:(map fst $ cookieJars), mconcat . map snd $ cookieJars)
         else return (hasJoinedQueue, responseCookies)
 
-makeRequest :: Manager -> Recursive -> Maybe CookieJar -> String -> IO (Bool, CookieJar)
-makeRequest manager recursive inputJar url = catch (makeRequest_ manager recursive inputJar url) $ 
+makeRequest :: Manager -> Recursive -> Maybe CookieJar -> JoinLink -> IO (Bool, CookieJar)
+makeRequest manager recursive inputJar url = catch (makeRequest_ manager recursive inputJar url) $
   \e -> return (e :: SomeException) >> do
-    putStrLn $ "request failing for url " ++ url
+    putStrLn $ "request failing for url " ++ (show url)
     return (False, fromMaybe (createCookieJar []) inputJar)
 
 type PrettyCookie = (B.ByteString, B.ByteString)
@@ -89,9 +131,10 @@ type PrettyCookie = (B.ByteString, B.ByteString)
 prettyPrintCookie :: Cookie -> PrettyCookie
 prettyPrintCookie c = (cookie_name c, cookie_value c)
 
+
 reqLoop :: TChan [PrettyCookie] -> Manager -> IO ()
 reqLoop chan manager = do
-  (inQueue, cookiez) <- makeRequest manager (Recursive True) Nothing "https://tickets.events.ccc.de/33c3/"
+  (inQueue, cookiez) <- makeRequest manager (Recursive True) Nothing $ Get cccAddress
   if inQueue
     then void . atomically . writeTChan chan . map prettyPrintCookie . destroyCookieJar $ cookiez
     else return ()
