@@ -91,8 +91,8 @@ findLinks = concat . map extractLinks . filter containsLink
 
 newtype Recursive = Recursive Bool
 
-makeRequest_ :: Manager -> Recursive -> Maybe CookieJar -> JoinLink -> IO (Bool, CookieJar)
-makeRequest_ manager (Recursive isRecursive) inputJar wrappedUrl = do
+makeRequest_ :: TChan [PrettyCookie] -> Manager -> Recursive -> Maybe CookieJar -> JoinLink -> IO ()
+makeRequest_ chan manager (Recursive isRecursive) inputJar wrappedUrl = do
   let cookieJar' = fromMaybe (createCookieJar []) inputJar
       (reqUrl, method) = case wrappedUrl of
         Get actionUrl -> (actionUrl, "GET")
@@ -100,7 +100,7 @@ makeRequest_ manager (Recursive isRecursive) inputJar wrappedUrl = do
         NoUrl          -> ("", "")
 
   case (parseRequest $ T.unpack reqUrl) :: Maybe Request of
-    Nothing -> return (False, cookieJar')
+    Nothing -> return ()
     Just request -> do
       let request' = request {
           method = method
@@ -113,18 +113,20 @@ makeRequest_ manager (Recursive isRecursive) inputJar wrappedUrl = do
           parsedBody      = parseTags body
           hasJoinedQueue  = joinedQueue parsedBody
 
+      if hasJoinedQueue
+        then void . atomically . writeTChan chan . map prettyPrintCookie . destroyCookieJar $ responseCookies
+        else return ()
+
       if isRecursive
         then do
           let links = findLinks parsedBody
-          cookieJars <- mapM (makeRequest manager (Recursive False) (Just responseCookies)) links
-          return (or $ hasJoinedQueue:(map fst $ cookieJars), mconcat . map snd $ cookieJars)
-        else return (hasJoinedQueue, responseCookies)
+          void $ mapM (makeRequest chan manager (Recursive False) (Just responseCookies)) links
+        else return ()
 
-makeRequest :: Manager -> Recursive -> Maybe CookieJar -> JoinLink -> IO (Bool, CookieJar)
-makeRequest manager recursive inputJar url = catch (makeRequest_ manager recursive inputJar url) $
+makeRequest :: TChan [PrettyCookie] -> Manager -> Recursive -> Maybe CookieJar -> JoinLink -> IO ()
+makeRequest chan manager recursive inputJar url = catch (makeRequest_ chan manager recursive inputJar url) $
   \e -> return (e :: SomeException) >> do
     putStrLn $ "request failing for url " ++ (show url)
-    return (False, fromMaybe (createCookieJar []) inputJar)
 
 type PrettyCookie = (B.ByteString, B.ByteString)
 
@@ -134,11 +136,7 @@ prettyPrintCookie c = (cookie_name c, cookie_value c)
 
 reqLoop :: TChan [PrettyCookie] -> Manager -> IO ()
 reqLoop chan manager = do
-  (inQueue, cookiez) <- makeRequest manager (Recursive True) Nothing $ Get cccAddress
-  if inQueue
-    then void . atomically . writeTChan chan . map prettyPrintCookie . destroyCookieJar $ cookiez
-    else return ()
-
+  makeRequest chan manager (Recursive True) Nothing $ Get cccAddress
   reqLoop chan manager
 
 readChan :: TChan [PrettyCookie] -> IO ()
