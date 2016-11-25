@@ -7,7 +7,7 @@ import Text.HTML.TagSoup
 import Network.HTTP.Types.Status (statusCode)
 import qualified Data.ByteString as B
 import Data.ByteString.Lazy (toStrict)
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.List (any)
@@ -104,7 +104,7 @@ makeRequest_ chan manager (Recursive isRecursive) inputJar wrappedUrl = do
     Just request -> do
       let request' = request {
           method = method
-        , requestHeaders = [("user-agent", userAgent)]
+        , requestHeaders = [("user-agent", userAgent), ("referer", encodeUtf8 cccAddress)]
         , cookieJar = Just cookieJar'
       }
       response <- httpLbs request' manager
