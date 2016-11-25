@@ -55,7 +55,9 @@ toLink attrMap = case M.lookup "action" attrMap of
       _      -> NoUrl
     Nothing -> NoUrl
   Nothing -> case M.lookup "href" attrMap of
-    Just actionUrl -> Get actionUrl
+    Just actionUrl -> case (T.count "mailto:" actionUrl) > 0 of
+      False -> Get actionUrl
+      True -> NoUrl
     Nothing -> NoUrl
 
 urlToAbsolute :: Text -> Text
